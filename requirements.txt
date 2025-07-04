@@ -60,7 +60,7 @@ pillow==11.2.1
 platformdirs==4.3.8
 promise==2.3
 prompt_toolkit==3.0.51
-protobuf==5.29.5
+protobuf>=4.21.6,<4.22   # <-- moved here (order doesn’t matter)
 psutil==7.0.0
 ptyprocess==0.7.0
 pure_eval==0.2.3
