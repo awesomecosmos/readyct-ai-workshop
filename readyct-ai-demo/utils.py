@@ -1,6 +1,7 @@
 import os
 import random
 import urllib.request
+import json
 
 import numpy as np
 import ndjson
@@ -20,18 +21,13 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 from torchvision import datasets, transforms
 
 
-def download_and_preprocess_data(doodles=True):
-    if doodles is True:
-        cats, dogs = load_doodles_data()
-        X, y = get_x_and_y_data(cats, dogs)
-        return X, y
-    
-    else: # CIFAR10
-        X, X_flat, y = load_cifar10_cats_and_dogs()
-        return X, X_flat, y
-
-
 def load_doodles_data():
+    cats, dogs = download_doodles_data()
+    X, y = get_x_and_y_data(cats, dogs)
+    return X, y
+
+
+def download_doodles_data(limit=500):
     os.makedirs("data", exist_ok=True)
 
     urls = {
@@ -40,19 +36,28 @@ def load_doodles_data():
     }
 
     for filename, url in urls.items():
-        print(f"Downloading {filename}...")
-        urllib.request.urlretrieve(url, filename)
-
+        if not os.path.exists(filename):  # ✅ avoid re-downloading
+            print(f"Downloading {filename}...")
+            urllib.request.urlretrieve(url, filename)
+        else:
+            print(f"{filename} already downloaded.")
     print("Download complete.")
 
-    with open("data/cat.ndjson") as f:
-        cats = ndjson.load(f)
+    def load_first_n(path, n):
+        data = []
+        with open(path, 'r') as f:
+            for i, line in enumerate(f):
+                if i >= n:
+                    break
+                data.append(json.loads(line))
+        return data
 
-    with open("data/dog.ndjson") as f:
-        dogs = ndjson.load(f)
-
+    print(f"Loading first {limit} cats and dogs...")
+    cats = load_first_n("data/cat.ndjson", limit)
+    dogs = load_first_n("data/dog.ndjson", limit)
     print(f"Loaded {len(cats)} cats and {len(dogs)} dogs.")
-    plot_random_dataset_images(cats, dogs)
+
+    plot_random_dataset_images(cats, dogs, dataset_type='doodles')
     return cats, dogs
 
 
@@ -215,23 +220,26 @@ def load_cifar10_cats_and_dogs(num_per_class=200, image_size=(64, 64)):
 
 def show_10_random_predictions(X_test, y_test, model, model_type='sklearn', model_name='Model', accuracy=None, dataset_type='doodles'):
     """
-    Display 10 random predictions with correct/incorrect color and true labels.
+    Display 10 predictions based on accuracy: e.g., 7 correct + 3 incorrect if accuracy=70%.
 
     model_type: 'sklearn' or 'resnet'
     dataset_type: 'doodles' or 'cifar'
     """
-    plt.figure(figsize=(15, 5))
-    indices = random.sample(range(len(X_test)), 10)
+    if accuracy is None:
+        raise ValueError("Accuracy must be provided to sample correct/incorrect predictions accordingly.")
 
-    for i, idx in enumerate(indices):
-        x = X_test[idx]
-        label = y_test[idx]
+    model.eval() if model_type == 'resnet' else None
+    correct_samples = []
+    incorrect_samples = []
+
+    for i in range(len(X_test)):
+        x = X_test[i]
+        y_true = y_test[i]
 
         # Predict
         if model_type == 'sklearn':
-            pred = model.predict([x])[0]
+            y_pred = model.predict([x])[0]
         elif model_type == 'resnet':
-            model.eval()
             with torch.no_grad():
                 if dataset_type == 'doodles':
                     img_tensor = torch.tensor(x.reshape(1, 1, 28, 28), dtype=torch.float32)
@@ -239,13 +247,32 @@ def show_10_random_predictions(X_test, y_test, model, model_type='sklearn', mode
                     img_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)  # (1, 3, 64, 64)
                 img_tensor = img_tensor.to(next(model.parameters()).device)
                 outputs = model(img_tensor)
-                pred = torch.argmax(outputs, dim=1).item()
+                y_pred = torch.argmax(outputs, dim=1).item()
         else:
-            raise ValueError("model_type must be 'sklearn' or 'resnet'")
+            raise ValueError("Unknown model_type")
 
-        correct = (pred == label)
-        pred_text = f"Pred: {'Dog' if pred else 'Cat'}"
-        true_text = f"True: {'Dog' if label else 'Cat'}"
+        sample = (x, y_true, y_pred)
+        if y_pred == y_true:
+            correct_samples.append(sample)
+        else:
+            incorrect_samples.append(sample)
+
+        if len(correct_samples) >= 10 and len(incorrect_samples) >= 10:
+            break
+
+    # Decide how many to display based on accuracy
+    correct_n = round(accuracy / 10)  # 74.3% => 7
+    incorrect_n = 10 - correct_n
+
+    selected = random.sample(correct_samples, min(correct_n, len(correct_samples))) + \
+               random.sample(incorrect_samples, min(incorrect_n, len(incorrect_samples)))
+    random.shuffle(selected)
+
+    plt.figure(figsize=(15, 5))
+    for i, (x, y_true, y_pred) in enumerate(selected):
+        correct = (y_pred == y_true)
+        pred_text = f"Pred: {'Dog' if y_pred else 'Cat'}"
+        true_text = f"True: {'Dog' if y_true else 'Cat'}"
         color = 'green' if correct else 'red'
 
         plt.subplot(2, 5, i + 1)
@@ -259,12 +286,13 @@ def show_10_random_predictions(X_test, y_test, model, model_type='sklearn', mode
             raise ValueError("Unknown dataset_type")
 
         plt.axis('off')
-        plt.title(f"{pred_text} | {true_text}", color=color, fontsize=10)
+        plt.title(f"{pred_text}\n{true_text}", color=color, fontsize=10)
 
-    acc_text = f" ({accuracy:.2f}%)" if accuracy is not None else ""
-    plt.suptitle(f"10 Random Predictions from {model_name}{acc_text}", fontsize=14)
+    plt.suptitle(f"10 Predictions from {model_name} ({accuracy:.2f}%)", fontsize=14)
     plt.tight_layout()
     plt.show()
+
+
 
 def plot_accuracy_curve(accuracies, title="Epoch vs Accuracy", ylabel="Accuracy (%)"):
     """
@@ -287,7 +315,35 @@ def plot_accuracy_curve(accuracies, title="Epoch vs Accuracy", ylabel="Accuracy 
     plt.xlabel("Epoch")
     plt.ylabel(ylabel)
     plt.title(title)
-    plt.ylim(0, 100)  # ✅ Set y-axis limits
+    plt.ylim(0, 100)  
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+
+def train_perceptron(X, y, lr=0.01, epochs=10):
+    num_features = X.shape[1]
+    weights = np.zeros(num_features)
+    bias = 0
+
+    for epoch in range(epochs):
+        correct = 0
+        for xi, target in zip(X, y):
+            z = np.dot(xi, weights) + bias
+            pred = 1 if z >= 0 else 0
+            error = target - pred
+
+            # Update rule
+            weights += lr * error * xi
+            bias += lr * error
+
+            if pred == target:
+                correct += 1
+        acc = correct / len(X)
+        print(f"Epoch {epoch+1}: Accuracy = {acc * 100:.2f}%")
+
+    return weights, bias
+
+def predict_perceptron(X, weights, bias):
+    z = np.dot(X, weights) + bias
+    return (z >= 0).astype(int)
